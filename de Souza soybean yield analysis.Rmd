@@ -1,0 +1,198 @@
+---
+title: "Checking de Souza et al 2022 soybean yield data"
+author: "Jim Holland"
+date: '2022-09-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lme4)
+library(pbkrtest)
+library(viridis)
+```
+
+# 2020 yield data
+Get yield data for 2020 soybean yield trial of transgenic vs WT contol
+de Souza et al.Science 2022 Aug 19;377(6608):851-854.
+doi: 10.1126/science.adc9831
+
+```{r}
+dat20 = read.csv("Q:/My Drive/Long soybean data/de Souza 2020 soybean yield data.csv") %>%
+  mutate(Entry = as.factor(Entry),
+         Block = as.factor(Block))
+```
+
+Plot the yield values
+```{r}
+ggplot(dat20, aes(x = Entry, y = Yield)) +
+  geom_boxplot(aes(fill = Entry)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+linear mixed model for yield, assuming this is an RCBD
+```{r}
+rcbd.mod = lmer(Yield ~ (1|Block) + Entry, data = dat20)
+summary(rcbd.mod, correlation = F)
+```
+reduced rcbd model, with no entry effects
+```{r}
+rcbd.mod.red = lmer(Yield ~ (1|Block), data = dat20)
+```
+
+F-test and p-value for Entry effects using Kenward Roger method
+
+```{r}
+pbkrtest::KRmodcomp(largeModel = rcbd.mod, smallModel = rcbd.mod.red)
+```
+Fit a fixed lm to the data, this should provide exact same results as Dataset D27
+```{r}
+rcbd.lm = lm(Yield ~ Block + Entry, data = dat20)
+anova(rcbd.lm)
+```
+Yes, these results agree with their D27.  
+  
+Tukey HSD on genotype mean comparisons
+```{r}
+tuk = TukeyHSD(aov(rcbd.lm), which = "Entry")
+summary(tuk$Entry[,"p adj"])
+```
+Tukey is too conservative here, since we don't really care about all possible comparisons.  
+Really just want to test if each transgenic differs from control. That is 8 tests, so we can correct for multiple testing by using Bonferroni with 8 tests
+```{r}
+effects.mat = summary(rcbd.lm)$coefficients
+
+#keep only the entry effects
+effects.mat = effects.mat[grepl("Entry", rownames(effects.mat)),]
+#fix up the effect names
+rownames(effects.mat) = sub("Entry", "", rownames(effects.mat))
+effects.mat
+```
+WT is the control, make all the comparisons against that.  
+One of the entries has estimate value of 0.
+```{r}
+effects  = effects.mat[,"Estimate"]
+
+wt = effects["WT"]
+
+#remove the intercept and control
+others = effects[!names(effects) == "WT"] 
+
+#add in the entry with zero coefficient
+zero = c(0)
+names(zero) = unique(dat20$Entry)[!unique(dat20$Entry) %in% names(effects)]
+others = c(others, zero)
+
+#compute the differences between others and wt
+difs = others - wt
+difs
+```
+
+Compute the p-values for these comparisons. Std errors of coefficients are all the same, makes this easy
+```{r}
+# compute standard error of mean difference:
+sed = sigma(rcbd.lm)*sqrt(2/15)
+tvalues = difs/sed
+pvalues = dt(tvalues, df = df.residual(rcbd.mod))
+pvalues
+```
+
+The alpha 0.05 level should be divided by 8 to get Bonferroni adjusted threshold p-value for significance
+```{r}
+0.05/8
+```
+Do any of the 8 comparisons pass the Bonferroni adjustment?
+```{r}
+pvalues < (0.05/8)
+```
+They also claim to have used Benjamini-Hochberg FDR. Let's get the BH FDR adjusted p-values
+```{r}
+p.adjust(pvalues, method = "BH") 
+```
+Are any of these less than 0.05?
+```{r}
+p.adjust(pvalues, method = "BH") < 0.05
+```
+No.
+
+# 2021 data
+```{r}
+dat21 = read.csv("Q:/My Drive/Long soybean data/de Souza 2021 yield data.csv") %>%
+  mutate(Entry = as.factor(Entry),
+         Block = as.factor(Block))
+```
+
+Plot the yield values
+```{r}
+ggplot(dat21, aes(x = Entry, y = Yield)) +
+  geom_boxplot(aes(fill = Entry)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+The yield rankings have changed dramatically across years.
+Fit these data to fixed effects ANOVA model
+```{r}
+rcbd.lm21 = lm(Yield ~ Block + Entry, data = dat21)
+anova(rcbd.lm21)
+```
+No significant differences.  
+Compute the means to see if they agree with Fig S12. Data are balanced, so simple means are fine:
+```{r}
+dat21 %>% group_by(Entry) %>%
+  summarize(Mean_yield = mean(Yield))
+```
+Looks like their figure.
+
+
+#Response of soybean yield to planting density
+Data from Parks et al. 1982 TN Agric. Exp. Stn. Bull 615. Cited in Duncan 1986 Crop Science 26:584-588.
+
+Get the data
+```{r}
+parks = read.csv("Q:/My Drive/Long soybean data/Parks 1983 soybean yield density data.csv")
+parks.long = parks %>%
+  pivot_longer(cols = c("Yield_g_m2", "Yield_g_plant"), values_to = "Yield", names_to = "Yield_type") %>%
+  mutate(Yield_type = ifelse(Yield_type == "Yield_g_m2", "Yield (g/m^2)", "Yield (g/plant)"),
+         Row.width = as.factor(Row.width))
+```
+
+Plot the yields per area and yield per plant as a function of population density
+```{r}
+density.response.plot = ggplot(parks.long, aes(x = Population, y = Yield)) + 
+  geom_point(aes(colour = Row.width), size = 3) + 
+  facet_wrap(facets = ~Yield_type, scales = "free") +
+  scale_color_viridis(discrete = T, name = "Row width") +
+  xlab("Planting density (plants per m^2)") +
+  theme_minimal() +
+  theme(text=element_text(size=21))
+
+density.response.plot
+```
+Save the graph
+```{r}
+ggsave("Q:/My Drive/Long soybean data/Parks 1983 soybean yield density graph.png", density.response.plot, width = 10, height = 8, units = "in")
+```
+
+Get the data from Schutz and Bernard on G x E Interactions in the Regional Tesing of Soybean Strains. Crop Science 1967
+```{r}
+gxe = read.csv("Q:/My Drive/Long soybean data/Vg and Vge estimates soybean yield Shutz Bernard 1967.csv") %>%
+  mutate(Vsum = Vg+ Vge,
+         Genotype = Vg/Vsum,
+         GxE = Vge/Vsum) %>%
+  pivot_longer(cols = c('Genotype', 'GxE'), names_to = "Component", values_to = "Proportion")
+
+gxe.plot = ggplot(gxe, aes(x = Maturity_group, y = Proportion)) +
+  geom_bar(stat = "identity", aes(fill = Component), position = "dodge") +
+  scale_fill_viridis(discrete = T, option = "cividis", name = "Variance\nComponent") +
+  xlab("Maturity group") +
+  theme_minimal()+
+  theme(text=element_text(size=21))
+
+gxe.plot
+```
+Write the figure to a file
+```{r}
+ggsave("Q:/My Drive/Long soybean data/Vg and Vge estimates soybean yield.png",gxe.plot, width = 10, height = 8, units = "in")
+```
+
